@@ -1,0 +1,238 @@
+#include <Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+const int trigPin = 11;
+const int echoPin = 10;
+const int servoPin = 5;
+Servo doorServo;
+const int ldrPin = A1;
+const int ledPin = 4;
+const int tempPin = A0;
+const int fanPin = 9;
+const int pirPin = 6;
+const int buzzerPin = 2;
+const int gasPin = A2;
+const int DOOR_DISTANCE_THRESHOLD = 50;   
+const int LDR_DARK_THRESHOLD      = 500; 
+const int GAS_THRESHOLD           = 550; 
+bool doorOpen = false;
+int distanceCm = 0;
+int ldrValue = 0;
+float tempC = 0;
+int pwmValue = 0;
+int motionState = 0;
+int gasValue = 0;
+bool gasLeak = false;
+void setup() {
+  Serial.begin(9600);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(fanPin, OUTPUT);
+  pinMode(pirPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
+
+  // Servo attach - start in locked position
+  doorServo.attach(servoPin);
+  doorServo.write(0);   // 0 degrees = locked
+  delay(500);
+
+  // LCD init
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Smart Home Sys");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+  delay(1500);
+  lcd.clear();
+}
+
+void loop() {
+  Serial.println(F("========== SENSOR READINGS =========="));
+
+  handleDoorLock();
+  handleAutoLight();
+  handleFanSpeed();
+  handleGasSensor();     // sounds 2 beeps if gas leak detected
+  handlePIRMotion();     // sounds 1 beep if motion detected
+
+  Serial.println(F("======================================"));
+  Serial.println();
+
+  displayOnLCD();
+
+  delay(500);   // overall reading interval
+}
+
+// ================= DOOR LOCK/UNLOCK =================
+void handleDoorLock() {
+  long duration;
+
+  // Trigger ultrasonic pulse
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Read echo pulse duration
+  duration = pulseIn(echoPin, HIGH, 30000); // timeout 30ms
+  distanceCm = duration * 0.034 / 2;        // convert to cm
+
+  Serial.print(F("[Door]  Distance: "));
+  Serial.print(distanceCm);
+  Serial.print(F(" cm  |  Status: "));
+
+  if (distanceCm > 0 && distanceCm <= DOOR_DISTANCE_THRESHOLD) {
+    if (!doorOpen) {
+      doorServo.write(90);   // unlock/open position
+      doorOpen = true;
+    }
+    Serial.println(F("UNLOCKED"));
+  } else {
+    if (doorOpen) {
+      doorServo.write(0);    // locked position
+      doorOpen = false;
+    }
+    Serial.println(F("LOCKED"));
+  }
+}
+
+// ================= AUTOMATIC LIGHT (LDR) =================
+void handleAutoLight() {
+  ldrValue = analogRead(ldrPin);
+
+  Serial.print(F("[Light] LDR Value: "));
+  Serial.print(ldrValue);
+  Serial.print(F("  |  Status: "));
+
+  if (ldrValue < LDR_DARK_THRESHOLD) {
+    digitalWrite(ledPin, HIGH);  // dark -> turn light ON
+    Serial.println(F("ON"));
+  } else {
+    digitalWrite(ledPin, LOW);   // bright -> turn light OFF
+    Serial.println(F("OFF"));
+  }
+}
+
+// ================= AUTOMATIC FAN SPEED CONTROL =================
+void handleFanSpeed() {
+  int sensorValue = analogRead(tempPin);
+  tempC = sensorValue * 0.488;   // convert ADC reading to degrees C (LM35)
+
+  // Condition 1: Low temperature -> Fan OFF
+  if (tempC < 23) {
+    pwmValue = 0;
+  }
+  // Condition 2: Moderate temperature -> Fan at MEDIUM speed
+  else if (tempC >= 23 && tempC < 33) {
+    pwmValue = 128;
+  }
+  // Condition 3: High temperature -> Fan at FULL speed
+  else {
+    pwmValue = 255;
+  }
+
+  analogWrite(fanPin, pwmValue);
+
+  Serial.print(F("[Fan]   Temp: "));
+  Serial.print(tempC);
+  Serial.print(F(" C  |  Fan Speed (PWM): "));
+  Serial.println(pwmValue);
+}
+
+// ================= GAS SENSOR (MQ2) - 2 BEEP ALERT =================
+void handleGasSensor() {
+  gasValue = analogRead(gasPin);
+  gasLeak = (gasValue > GAS_THRESHOLD);
+
+  Serial.print(F("[Gas]   Value: "));
+  Serial.print(gasValue);
+  Serial.print(F("  |  Status: "));
+
+  if (gasLeak) {
+    Serial.println(F("GAS LEAK DETECTED! Sounding 2 beeps"));
+    soundBeeps(2);   // gas alert = 2 beeps
+  } else {
+    Serial.println(F("Normal"));
+  }
+}
+
+// ================= PIR MOTION (SECRET LOCKER) - 1 BEEP ALERT =================
+void handlePIRMotion() {
+  motionState = digitalRead(pirPin);
+
+  Serial.print(F("[PIR]   Locker Motion: "));
+
+  if (motionState == HIGH) {
+    Serial.println(F("DETECTED! Sounding 1 beep"));
+    soundBeeps(1);   // PIR alert = 1 beep
+  } else {
+    Serial.println(F("NONE"));
+  }
+}
+
+// Helper: sound the buzzer 'n' short beeps (shared by PIR and Gas alerts)
+void soundBeeps(int n) {
+  for (int i = 0; i < n; i++) {
+    digitalWrite(buzzerPin, HIGH);
+    delay(200);
+    digitalWrite(buzzerPin, LOW);
+    delay(200);
+  }
+}
+
+// ================= DISPLAY ON 16x2 I2C LCD =================
+void displayOnLCD() {
+  // ---- Screen 1: Door status ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Door: ");
+  lcd.print(doorOpen ? "UNLOCKED" : "LOCKED");
+  lcd.setCursor(0, 1);
+  lcd.print("Dist: ");
+  lcd.print(distanceCm);
+  lcd.print(" cm");
+  delay(800);
+
+  // ---- Screen 2: Light status ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Light: ");
+  lcd.print(ldrValue < LDR_DARK_THRESHOLD ? "ON" : "OFF");
+  lcd.setCursor(0, 1);
+  lcd.print("LDR Val: ");
+  lcd.print(ldrValue);
+  delay(800);
+
+  // ---- Screen 3: Fan status ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(tempC);
+  lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Fan PWM: ");
+  lcd.print(pwmValue);
+  delay(800);
+
+  // ---- Screen 4: Gas status ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Gas Value: ");
+  lcd.print(gasValue);
+  lcd.setCursor(0, 1);
+  lcd.print(gasLeak ? "LEAK DETECTED!" : "Air Normal");
+  delay(800);
+
+  // ---- Screen 5: PIR status (Secret Locker) ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Locker Motion:");
+  lcd.setCursor(0, 1);
+  lcd.print(motionState == HIGH ? "DETECTED! ALARM" : "Secure - No Mvt");
+  delay(800);
+}
